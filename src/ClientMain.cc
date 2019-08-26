@@ -13,6 +13,7 @@
 #include <Homa/Debug.h>
 #include <Homa/Drivers/DPDK/DpdkDriver.h>
 #include <Homa/Homa.h>
+#include <PerfUtils/Cycles.h>
 #include <docopt.h>
 
 #include "Rpc.h"
@@ -215,8 +216,7 @@ nestedRpc(Config& config)
     request.responseBytes = config.receiveBytes;
 
     for (int i = 0; i < config.count; ++i) {
-        std::chrono::time_point<std::chrono::high_resolution_clock> start =
-            std::chrono::high_resolution_clock::now();
+        uint64_t start = PerfUtils::Cycles::rdtsc();
 
         Homa::RemoteOp op(config.transport);
         op.request->append(&request, sizeof(request));
@@ -228,9 +228,8 @@ nestedRpc(Config& config)
         op.response->get(0, &response, sizeof(response));
         op.response->get(sizeof(response), &buffer, response.responseBytes);
 
-        std::chrono::time_point<std::chrono::high_resolution_clock> stop =
-            std::chrono::high_resolution_clock::now();
-        times.emplace_back(stop - start);
+        uint64_t stop = PerfUtils::Cycles::rdtsc();
+        times.emplace_back(PerfUtils::Cycles::toSeconds(stop - start));
         if (response.responseBytes != request.responseBytes) {
             std::cerr << "Expected " << request.responseBytes
                       << " bytes but got " << response.responseBytes
@@ -264,8 +263,7 @@ ringRpc(Config& config)
     request.responseBytes = config.receiveBytes;
 
     for (int i = 0; i < config.count; ++i) {
-        std::chrono::time_point<std::chrono::high_resolution_clock> start =
-            std::chrono::high_resolution_clock::now();
+        uint64_t start = PerfUtils::Cycles::rdtsc();
 
         Homa::RemoteOp op(config.transport);
         op.request->append(&request, sizeof(request));
@@ -277,9 +275,8 @@ ringRpc(Config& config)
         op.response->get(0, &response, sizeof(response));
         op.response->get(sizeof(response), &buffer, response.responseBytes);
 
-        std::chrono::time_point<std::chrono::high_resolution_clock> stop =
-            std::chrono::high_resolution_clock::now();
-        times.emplace_back(stop - start);
+        uint64_t stop = PerfUtils::Cycles::rdtsc();
+        times.emplace_back(PerfUtils::Cycles::toSeconds(stop - start));
         if (response.responseBytes != request.responseBytes) {
             std::cerr << "Expected " << request.responseBytes
                       << " bytes but got " << response.responseBytes

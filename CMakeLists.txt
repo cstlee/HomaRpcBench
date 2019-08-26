@@ -26,6 +26,7 @@ project(HomaRpcBench VERSION 0.0.1 LANGUAGES CXX)
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/modules)
 
 find_package(Homa)
+find_package(PerfUtils)
 
 # Source control tool; needed to download external libraries.
 find_package(Git REQUIRED)
@@ -65,6 +66,7 @@ target_link_libraries(client
         Homa::Homa
         Homa::DpdkDriver
         docopt
+        PerfUtils
 )
 
 add_executable(server
