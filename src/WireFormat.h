@@ -16,6 +16,7 @@ enum Opcode {
     ENLIST_SERVER = 1,
     GET_SERVER_LIST,
     CONFIG_SERVER,
+    DUMP_TIMETRACE,
     ECHO,
     ECHO_MULTILEVEL,
     ILLEGAL_OPCODE,
@@ -78,6 +79,21 @@ struct ConfigServerRpc {
         /// If forward is false, the nextAddress will contain the address of the
         /// server to which the target server should chain the RPC.
         Homa::Driver::WireFormatAddress nextAddress;
+    } __attribute__((packed));
+
+    struct Response {
+        Common common;
+    } __attribute__((packed));
+};
+
+/**
+ * Used to request that a Server dump it's TimeTrace.
+ */
+struct DumpTimeTraceRpc {
+    static const Opcode opcode = DUMP_TIMETRACE;
+
+    struct Request {
+        Common common;
     } __attribute__((packed));
 
     struct Response {

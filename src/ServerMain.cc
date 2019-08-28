@@ -7,8 +7,11 @@
 #include <Homa/Debug.h>
 #include <Homa/Drivers/DPDK/DpdkDriver.h>
 #include <Homa/Homa.h>
+#include <PerfUtils/Cycles.h>
+#include <PerfUtils/TimeTrace.h>
 #include <docopt.h>
 
+#include "Output.h"
 #include "WireFormat.h"
 
 static const char USAGE[] = R"(HomaRpcBench Server.
@@ -17,9 +20,10 @@ static const char USAGE[] = R"(HomaRpcBench Server.
         server [options] [-v | -vv | -vvv | -vvvv] <port> <coordinator_address>
 
     Options:
-        -h --help       Show this screen.
-        --version       Show version.
-        -v --verbose    Show verbose output.
+        -h --help           Show this screen.
+        --version           Show version.
+        -v --verbose        Show verbose output.
+        --timetrace=<dir>   Directory where a timetrace log should be output.
 )";
 
 namespace HomaRpcBench {
@@ -54,8 +58,13 @@ Server::Server(Homa::Transport* transport)
 void
 Server::poll()
 {
+    uint64_t poll_start = PerfUtils::Cycles::rdtsc();
     Homa::ServerOp op = transport->receiveServerOp();
     if (op) {
+        PerfUtils::TimeTrace::record(poll_start,
+                                     "Benchmark: Server::poll : START");
+        PerfUtils::TimeTrace::record(
+            "Benchmark: Server::poll : ServerOp Constructed/Received");
         dispatch(&op);
     }
     transport->poll();
@@ -70,6 +79,10 @@ Server::dispatch(Homa::ServerOp* op)
     switch (common.opcode) {
         case WireFormat::ConfigServerRpc::opcode:
             handleConfigServerRpc(op);
+            break;
+        case WireFormat::DumpTimeTraceRpc::opcode:
+            PerfUtils::TimeTrace::print();
+            op->reply();
             break;
         case WireFormat::EchoRpc::opcode:
             handleEchoRpc(op);
@@ -107,22 +120,35 @@ Server::handleConfigServerRpc(Homa::ServerOp* op)
 void
 Server::handleEchoRpc(Homa::ServerOp* op)
 {
+    PerfUtils::TimeTrace::record("Benchmark: Server::handleEchoRpc : START");
     WireFormat::EchoRpc::Request request;
     WireFormat::EchoRpc::Response response;
     op->request->get(0, &request, sizeof(request));
     op->request->get(sizeof(request), &buffer, request.sentBytes);
+    PerfUtils::TimeTrace::record(
+        "Benchmark: Server::handleEchoRpc : Request deserialized");
 
     response.common.opcode = WireFormat::EchoRpc::opcode;
     response.hopCount = 1;
     response.responseBytes = request.responseBytes;
 
     if (proxy) {
+        PerfUtils::TimeTrace::record(
+            "Benchmark: Server::handleEchoRpc : Nested : START");
         Homa::RemoteOp proxyOp(transport);
+        PerfUtils::TimeTrace::record(
+            "Benchmark: Server::handleEchoRpc : Nested : RemoteOp constructed");
         proxyOp.request->append(&request, sizeof(request));
         proxyOp.request->append(&buffer, request.sentBytes);
+        PerfUtils::TimeTrace::record(
+            "Benchmark: Server::handleEchoRpc : Nested : Request serialized");
 
         proxyOp.send(delegate);
+        PerfUtils::TimeTrace::record(
+            "Benchmark: Server::handleEchoRpc : Nested : Request sent");
         proxyOp.wait();
+        PerfUtils::TimeTrace::record(
+            "Benchmark: Server::handleEchoRpc : Nested : Response received");
 
         WireFormat::EchoRpc::Response proxyResponse;
         proxyOp.response->get(0, &proxyResponse, sizeof(proxyResponse));
@@ -134,11 +160,18 @@ Server::handleEchoRpc(Homa::ServerOp* op)
                       << " bytes." << std::endl;
         }
         response.hopCount += proxyResponse.hopCount;
+        PerfUtils::TimeTrace::record(
+            "Benchmark: Server::handleEchoRpc : Nested : "
+            "Response deserialized");
     }
 
     op->response->append(&response, sizeof(response));
     op->response->append(&buffer, response.responseBytes);
+    PerfUtils::TimeTrace::record(
+        "Benchmark: Server::handleEchoRpc : Response serialized");
     op->reply();
+    PerfUtils::TimeTrace::record(
+        "Benchmark: Server::handleEchoRpc : Response sent (reply)");
 }
 
 void
@@ -227,6 +260,13 @@ main(int argc, char* argv[])
     enlistRpc.response->get(0, &response, sizeof(response));
 
     std::cout << "Registered as Server " << response.serverId << std::endl;
+
+    if (args["--timetrace"].isString()) {
+        std::string timetrace_log_path = args["--timetrace"].asString();
+        timetrace_log_path +=
+            Output::format("/server-%u-timetrace.log", response.serverId);
+        PerfUtils::TimeTrace::setOutputFileName(timetrace_log_path.c_str());
+    }
 
     // Run the server.
     while (true) {

@@ -56,6 +56,18 @@ configServer(Homa::Transport* transport, Homa::Driver::Address server,
     op.wait();
 }
 
+void
+dumpTimeTrace(Homa::Transport* transport, Homa::Driver::Address server)
+{
+    WireFormat::DumpTimeTraceRpc::Request request;
+    request.common.opcode = WireFormat::DumpTimeTraceRpc::opcode;
+
+    Homa::RemoteOp op(transport);
+    op.request->append(&request, sizeof(request));
+    op.send(server);
+    op.wait();
+}
+
 }  // namespace Rpc
 }  // namespace HomaRpcBench
 
