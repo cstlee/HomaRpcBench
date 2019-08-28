@@ -78,3 +78,12 @@ target_link_libraries(server
         Homa::DpdkDriver
         docopt
 )
+
+add_executable(dpdk_test
+    src/DpdkTestMain.cc
+)
+target_link_libraries(dpdk_test
+    PRIVATE
+        Homa::DpdkDriver
+        docopt
+)
