@@ -144,7 +144,9 @@ main(int argc, char* argv[])
         Homa::Debug::setLogPolicy(Homa::Debug::logPolicyFromString("VERBOSE"));
     }
 
-    Homa::Drivers::DPDK::DpdkDriver driver(port);
+    Homa::Drivers::DPDK::DpdkDriver::Config driverConfig;
+    driverConfig.HIGHEST_PACKET_PRIORITY_OVERRIDE = 0;
+    Homa::Drivers::DPDK::DpdkDriver driver(port, &driverConfig);
     Homa::Transport transport(
         &driver, std::hash<std::string>{}(
                      driver.addressToString(driver.getLocalAddress())));

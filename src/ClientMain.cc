@@ -256,7 +256,7 @@ main(int argc, char* argv[])
     }
 
     Config config;
-    config.count = 1000000;
+    config.count = 100000;
     config.hops = args["--hops"].asLong();
     config.sendBytes = args["--sendBytes"].asLong();
     config.receiveBytes = args["--receiveBytes"].asLong();
@@ -267,7 +267,9 @@ main(int argc, char* argv[])
         PerfUtils::TimeTrace::setOutputFileName(timetrace_log_path.c_str());
     }
 
-    Homa::Drivers::DPDK::DpdkDriver driver(port);
+    Homa::Drivers::DPDK::DpdkDriver::Config driverConfig;
+    driverConfig.HIGHEST_PACKET_PRIORITY_OVERRIDE = 0;
+    Homa::Drivers::DPDK::DpdkDriver driver(port, &driverConfig);
     Homa::Transport transport(
         &driver, std::hash<std::string>{}(
                      driver.addressToString(driver.getLocalAddress())));
