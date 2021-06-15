@@ -25,7 +25,8 @@ project(HomaRpcBench VERSION 0.0.1 LANGUAGES CXX)
 # Tell CMake where to find our custom/3rd-party "Find" modules
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/modules)
 
-find_package(Homa)
+find_package(Homa COMPONENTS DpdkDriver)
+find_package(Roo)
 find_package(PerfUtils)
 
 # Source control tool; needed to download external libraries.
@@ -53,6 +54,7 @@ add_executable(coordinator
 )
 target_link_libraries(coordinator
     PRIVATE
+        Roo::Roo
         Homa::Homa
         Homa::DpdkDriver
         docopt
@@ -63,6 +65,7 @@ add_executable(client
 )
 target_link_libraries(client
     PRIVATE
+        Roo::Roo
         Homa::Homa
         Homa::DpdkDriver
         docopt
@@ -74,6 +77,7 @@ add_executable(server
 )
 target_link_libraries(server
     PRIVATE
+        Roo::Roo
         Homa::Homa
         Homa::DpdkDriver
         docopt

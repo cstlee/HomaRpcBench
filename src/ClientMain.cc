@@ -1,3 +1,12 @@
+#include <Homa/Debug.h>
+#include <Homa/Drivers/DPDK/DpdkDriver.h>
+#include <Homa/Homa.h>
+#include <PerfUtils/Cycles.h>
+#include <PerfUtils/TimeTrace.h>
+#include <Roo/Roo.h>
+#include <docopt.h>
+#include <signal.h>
+
 #include <chrono>
 #include <cstdarg>
 #include <cstring>
@@ -6,15 +15,6 @@
 #include <map>
 #include <string>
 #include <vector>
-
-#include <signal.h>
-
-#include <Homa/Debug.h>
-#include <Homa/Drivers/DPDK/DpdkDriver.h>
-#include <Homa/Homa.h>
-#include <PerfUtils/Cycles.h>
-#include <PerfUtils/TimeTrace.h>
-#include <docopt.h>
 
 #include "Output.h"
 #include "Rpc.h"
@@ -40,6 +40,7 @@ using ServerMap = std::map<uint64_t, Homa::Driver::Address>;
 
 struct Config {
     Homa::Transport* transport;
+    Roo::Socket* socket;
     int count;
     ServerMap serverMap;
     int hops;
@@ -64,18 +65,19 @@ configServerChain(Config& config)
                   << config.serverMap.size() << " servers." << std::endl;
         throw;
     }
-    Homa::Driver* driver = config.transport->driver;
+    Homa::Driver* driver = config.transport->getDriver();
 
     int i = 0;
     auto entry = config.serverMap.begin();
     while ((i < config.hops - 1) &&
            std::next(entry) != config.serverMap.end()) {
-        HomaRpcBench::Rpc::configServer(config.transport, entry->second, true,
-                                        std::next(entry)->second);
+        HomaRpcBench::Rpc::configServer(config.socket, driver, entry->second,
+                                        true, std::next(entry)->second);
         ++i;
         ++entry;
     }
-    HomaRpcBench::Rpc::configServer(config.transport, entry->second, false);
+    HomaRpcBench::Rpc::configServer(config.socket, driver, entry->second,
+                                    false);
 }
 
 }  // namespace Setup
@@ -91,7 +93,7 @@ noop(Config&)
 void
 serverList(Config& config)
 {
-    Homa::Driver* driver = config.transport->driver;
+    Homa::Driver* driver = config.transport->getDriver();
 
     std::cout << "Server List has " << config.serverMap.size() << " entries."
               << std::endl;
@@ -123,18 +125,20 @@ nestedRpc(Config& config)
         uint64_t start = PerfUtils::Cycles::rdtsc();
         PerfUtils::TimeTrace::record(start, "Benchmark: +++ START +++");
 
-        Homa::RemoteOp op(config.transport);
-        PerfUtils::TimeTrace::record("Benchmark: RemoteOp constructed");
-        op.request->append(&request, sizeof(request));
-        op.request->append(&buffer, request.sentBytes);
+        Roo::unique_ptr<Roo::RooPC> rpc = config.socket->allocRooPC();
+        PerfUtils::TimeTrace::record("Benchmark: RooPC constructed");
+        Homa::unique_ptr<Homa::OutMessage> requestMsg = rpc->allocRequest();
+        requestMsg->append(&request, sizeof(request));
+        requestMsg->append(&buffer, request.sentBytes);
         PerfUtils::TimeTrace::record("Benchmark: Request serialized");
-        op.send(server);
+        rpc->send(server, std::move(requestMsg));
         PerfUtils::TimeTrace::record("Benchmark: Request sent");
 
-        op.wait();
+        rpc->wait();
         PerfUtils::TimeTrace::record("Benchmark: Response received");
-        op.response->get(0, &response, sizeof(response));
-        op.response->get(sizeof(response), &buffer, response.responseBytes);
+        Homa::unique_ptr<Homa::InMessage> responseMsg = rpc->receive();
+        responseMsg->get(0, &response, sizeof(response));
+        responseMsg->get(sizeof(response), &buffer, response.responseBytes);
         PerfUtils::TimeTrace::record("Benchmark: Response deserialized");
         uint64_t stop = PerfUtils::Cycles::rdtsc();
         times.emplace_back(PerfUtils::Cycles::toSeconds(stop - start));
@@ -153,7 +157,8 @@ nestedRpc(Config& config)
     if (config.timetrace) {
         PerfUtils::TimeTrace::print();
         for (auto server : config.serverMap) {
-            HomaRpcBench::Rpc::dumpTimeTrace(config.transport, server.second);
+            HomaRpcBench::Rpc::dumpTimeTrace(
+                config.socket, config.transport->getDriver(), server.second);
         }
     }
 }
@@ -180,18 +185,20 @@ ringRpc(Config& config)
         uint64_t start = PerfUtils::Cycles::rdtsc();
         PerfUtils::TimeTrace::record(start, "Benchmark: +++ START +++");
 
-        Homa::RemoteOp op(config.transport);
+        Roo::unique_ptr<Roo::RooPC> rpc = config.socket->allocRooPC();
         PerfUtils::TimeTrace::record("Benchmark: RemoteOp constructed");
-        op.request->append(&request, sizeof(request));
-        op.request->append(&buffer, request.sentBytes);
+        Homa::unique_ptr<Homa::OutMessage> requestMsg = rpc->allocRequest();
+        requestMsg->append(&request, sizeof(request));
+        requestMsg->append(&buffer, request.sentBytes);
         PerfUtils::TimeTrace::record("Benchmark: Request serialized");
-        op.send(server);
+        rpc->send(server, std::move(requestMsg));
         PerfUtils::TimeTrace::record("Benchmark: Request sent");
 
-        op.wait();
+        rpc->wait();
         PerfUtils::TimeTrace::record("Benchmark: Response received");
-        op.response->get(0, &response, sizeof(response));
-        op.response->get(sizeof(response), &buffer, response.responseBytes);
+        Homa::unique_ptr<Homa::InMessage> responseMsg = rpc->receive();
+        responseMsg->get(0, &response, sizeof(response));
+        responseMsg->get(sizeof(response), &buffer, response.responseBytes);
         PerfUtils::TimeTrace::record("Benchmark: Response deserialized");
 
         uint64_t stop = PerfUtils::Cycles::rdtsc();
@@ -207,7 +214,8 @@ ringRpc(Config& config)
     if (config.timetrace) {
         PerfUtils::TimeTrace::print();
         for (auto server : config.serverMap) {
-            HomaRpcBench::Rpc::dumpTimeTrace(config.transport, server.second);
+            HomaRpcBench::Rpc::dumpTimeTrace(
+                config.socket, config.transport->getDriver(), server.second);
         }
     }
 }
@@ -265,18 +273,21 @@ main(int argc, char* argv[])
         std::string timetrace_log_path = args["--timetrace"].asString();
         timetrace_log_path += "/client-timetrace.log";
         PerfUtils::TimeTrace::setOutputFileName(timetrace_log_path.c_str());
+        std::cout << "TimeTrace Path: " << timetrace_log_path << std::endl;
     }
 
     Homa::Drivers::DPDK::DpdkDriver::Config driverConfig;
     driverConfig.HIGHEST_PACKET_PRIORITY_OVERRIDE = 0;
     Homa::Drivers::DPDK::DpdkDriver driver(port, &driverConfig);
-    Homa::Transport transport(
+    std::unique_ptr<Homa::Transport> transport(Homa::Transport::create(
         &driver, std::hash<std::string>{}(
-                     driver.addressToString(driver.getLocalAddress())));
-    config.transport = &transport;
+                     driver.addressToString(driver.getLocalAddress()))));
+    config.transport = transport.get();
+    std::unique_ptr<Roo::Socket> socket = Roo::Socket::create(transport.get());
+    config.socket = socket.get();
 
     Homa::Driver::Address coordinatorAddr = driver.getAddress(&coordinator_mac);
-    HomaRpcBench::Rpc::getServerList(&transport, coordinatorAddr,
+    HomaRpcBench::Rpc::getServerList(socket.get(), &driver, coordinatorAddr,
                                      &config.serverMap);
 
     // Register the signal handler

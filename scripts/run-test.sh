@@ -63,7 +63,7 @@ for HOST in ${SERVER_HOSTS[@]}
 do
     echo "Start Server $SERVER_ID on $HOST"
     ssh $HOST "mkdir -p ~/logs/$DATE_TIME"
-    remote_start $HOST "sudo $SERVER 1 $COORDINATOR_MAC --timetrace ~/logs/$DATE_TIME" "~/logs/$DATE_TIME/server-$SERVER_ID"
+    remote_start $HOST "sudo $SERVER 1 $COORDINATOR_MAC -vvv --timetrace ~/logs/$DATE_TIME" "~/logs/$DATE_TIME/server-$SERVER_ID"
     let "SERVER_ID++"
     sleep 0.5
 done
@@ -71,7 +71,7 @@ done
 ##### Run Client
 echo "Run Client on $CLIENT_HOST"
 ssh $CLIENT_HOST "mkdir -p ~/logs/$DATE_TIME"
-ssh $CLIENT_HOST "sudo $CLIENT 1 $COORDINATOR_MAC $TEST --timetrace ~/logs/$DATE_TIME" > "$LOG_DIR/$DATE_TIME/client.out.log" 2> "$LOG_DIR/$DATE_TIME/client.err.log"
+ssh $CLIENT_HOST "sudo $CLIENT 1 $COORDINATOR_MAC $TEST -vvv --timetrace ~/logs/$DATE_TIME" > "$LOG_DIR/$DATE_TIME/client.out.log" 2> "$LOG_DIR/$DATE_TIME/client.err.log"
 
 ##### Collect Logs
 # Coordinator Logs

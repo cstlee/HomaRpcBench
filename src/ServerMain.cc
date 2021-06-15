@@ -1,15 +1,15 @@
-#include <functional>
-#include <iostream>
-#include <map>
-
-#include <signal.h>
-
 #include <Homa/Debug.h>
 #include <Homa/Drivers/DPDK/DpdkDriver.h>
 #include <Homa/Homa.h>
 #include <PerfUtils/Cycles.h>
 #include <PerfUtils/TimeTrace.h>
+#include <Roo/Roo.h>
 #include <docopt.h>
+#include <signal.h>
+
+#include <functional>
+#include <iostream>
+#include <map>
 
 #include "Output.h"
 #include "WireFormat.h"
@@ -33,24 +33,27 @@ namespace HomaRpcBench {
  */
 class Server {
   public:
-    explicit Server(Homa::Transport* transport);
+    explicit Server(Homa::Transport* transport,
+                    std::unique_ptr<Roo::Socket> socket);
 
     void poll();
 
   private:
-    void dispatch(Homa::ServerOp* op);
-    void handleConfigServerRpc(Homa::ServerOp* op);
-    void handleEchoRpc(Homa::ServerOp* op);
-    void handleEchoMultiLevelRpc(Homa::ServerOp* op);
+    void dispatch(Roo::unique_ptr<Roo::ServerTask> task);
+    void handleConfigServerRpc(Roo::unique_ptr<Roo::ServerTask> task);
+    void handleEchoRpc(Roo::unique_ptr<Roo::ServerTask> task);
+    void handleEchoMultiLevelRpc(Roo::unique_ptr<Roo::ServerTask> task);
 
     Homa::Transport* transport;
+    std::unique_ptr<Roo::Socket> socket;
     bool proxy;
     Homa::Driver::Address delegate;
     char buffer[1024 * 1024];
 };
 
-Server::Server(Homa::Transport* transport)
+Server::Server(Homa::Transport* transport, std::unique_ptr<Roo::Socket> socket)
     : transport(transport)
+    , socket(std::move(socket))
     , proxy(false)
     , delegate()
 {}
@@ -59,36 +62,35 @@ void
 Server::poll()
 {
     uint64_t poll_start = PerfUtils::Cycles::rdtsc();
-    Homa::ServerOp op = transport->receiveServerOp();
-    if (op) {
+    Roo::unique_ptr<Roo::ServerTask> task = socket->receive();
+    if (task) {
         PerfUtils::TimeTrace::record(poll_start,
                                      "Benchmark: Server::poll : START");
         PerfUtils::TimeTrace::record(
-            "Benchmark: Server::poll : ServerOp Constructed/Received");
-        dispatch(&op);
+            "Benchmark: Server::poll : ServerTask Constructed/Received");
+        dispatch(std::move(task));
     }
-    transport->poll();
+    socket->poll();
 }
 
 void
-Server::dispatch(Homa::ServerOp* op)
+Server::dispatch(Roo::unique_ptr<Roo::ServerTask> task)
 {
     WireFormat::Common common;
-    op->request->get(0, &common, sizeof(common));
+    task->getRequest()->get(0, &common, sizeof(common));
 
     switch (common.opcode) {
         case WireFormat::ConfigServerRpc::opcode:
-            handleConfigServerRpc(op);
+            handleConfigServerRpc(std::move(task));
             break;
         case WireFormat::DumpTimeTraceRpc::opcode:
             PerfUtils::TimeTrace::print();
-            op->reply();
             break;
         case WireFormat::EchoRpc::opcode:
-            handleEchoRpc(op);
+            handleEchoRpc(std::move(task));
             break;
         case WireFormat::EchoMultiLevelRpc::opcode:
-            handleEchoMultiLevelRpc(op);
+            handleEchoMultiLevelRpc(std::move(task));
             break;
         default:
             std::cerr << "Unknown opcode" << std::endl;
@@ -96,35 +98,37 @@ Server::dispatch(Homa::ServerOp* op)
 }
 
 void
-Server::handleConfigServerRpc(Homa::ServerOp* op)
+Server::handleConfigServerRpc(Roo::unique_ptr<Roo::ServerTask> task)
 {
     WireFormat::ConfigServerRpc::Request request;
     WireFormat::ConfigServerRpc::Response response;
-    op->request->get(0, &request, sizeof(request));
+    task->getRequest()->get(0, &request, sizeof(request));
     proxy = request.forward;
     if (proxy) {
-        delegate = transport->driver->getAddress(&request.nextAddress);
+        delegate = transport->getDriver()->getAddress(&request.nextAddress);
     }
 
     response.common.opcode = WireFormat::ConfigServerRpc::opcode;
-    op->response->append(&response, sizeof(response));
-    op->reply();
+    Homa::unique_ptr<Homa::OutMessage> responseMsg = task->allocOutMessage();
+    responseMsg->append(&response, sizeof(response));
+    task->reply(std::move(responseMsg));
     if (proxy) {
         std::cout << "Server configured as proxy to "
-                  << transport->driver->addressToString(delegate) << std::endl;
+                  << transport->getDriver()->addressToString(delegate)
+                  << std::endl;
     } else {
         std::cout << "Server configured" << std::endl;
     }
 }
 
 void
-Server::handleEchoRpc(Homa::ServerOp* op)
+Server::handleEchoRpc(Roo::unique_ptr<Roo::ServerTask> task)
 {
     PerfUtils::TimeTrace::record("Benchmark: Server::handleEchoRpc : START");
     WireFormat::EchoRpc::Request request;
     WireFormat::EchoRpc::Response response;
-    op->request->get(0, &request, sizeof(request));
-    op->request->get(sizeof(request), &buffer, request.sentBytes);
+    task->getRequest()->get(0, &request, sizeof(request));
+    task->getRequest()->get(sizeof(request), &buffer, request.sentBytes);
     PerfUtils::TimeTrace::record(
         "Benchmark: Server::handleEchoRpc : Request deserialized");
 
@@ -135,25 +139,28 @@ Server::handleEchoRpc(Homa::ServerOp* op)
     if (proxy) {
         PerfUtils::TimeTrace::record(
             "Benchmark: Server::handleEchoRpc : Nested : START");
-        Homa::RemoteOp proxyOp(transport);
+        Roo::unique_ptr<Roo::RooPC> proxyRpc = socket->allocRooPC();
         PerfUtils::TimeTrace::record(
-            "Benchmark: Server::handleEchoRpc : Nested : RemoteOp constructed");
-        proxyOp.request->append(&request, sizeof(request));
-        proxyOp.request->append(&buffer, request.sentBytes);
+            "Benchmark: Server::handleEchoRpc : Nested : RooPC constructed");
+        Homa::unique_ptr<Homa::OutMessage> requestMsg =
+            proxyRpc->allocRequest();
+        requestMsg->append(&request, sizeof(request));
+        requestMsg->append(&buffer, request.sentBytes);
         PerfUtils::TimeTrace::record(
             "Benchmark: Server::handleEchoRpc : Nested : Request serialized");
 
-        proxyOp.send(delegate);
+        proxyRpc->send(delegate, std::move(requestMsg));
         PerfUtils::TimeTrace::record(
             "Benchmark: Server::handleEchoRpc : Nested : Request sent");
-        proxyOp.wait();
+        proxyRpc->wait();
         PerfUtils::TimeTrace::record(
             "Benchmark: Server::handleEchoRpc : Nested : Response received");
 
         WireFormat::EchoRpc::Response proxyResponse;
-        proxyOp.response->get(0, &proxyResponse, sizeof(proxyResponse));
-        proxyOp.response->get(sizeof(proxyResponse), &buffer,
-                              proxyResponse.responseBytes);
+        Homa::unique_ptr<Homa::InMessage> responseMsg = proxyRpc->receive();
+        responseMsg->get(0, &proxyResponse, sizeof(proxyResponse));
+        responseMsg->get(sizeof(proxyResponse), &buffer,
+                         proxyResponse.responseBytes);
         if (proxyResponse.responseBytes != request.responseBytes) {
             std::cerr << "Expected " << request.responseBytes
                       << " bytes but only got " << proxyResponse.responseBytes
@@ -165,33 +172,38 @@ Server::handleEchoRpc(Homa::ServerOp* op)
             "Response deserialized");
     }
 
-    op->response->append(&response, sizeof(response));
-    op->response->append(&buffer, response.responseBytes);
+    Homa::unique_ptr<Homa::OutMessage> responseMsg = task->allocOutMessage();
+    responseMsg->append(&response, sizeof(response));
+    responseMsg->append(&buffer, response.responseBytes);
     PerfUtils::TimeTrace::record(
         "Benchmark: Server::handleEchoRpc : Response serialized");
-    op->reply();
+    task->reply(std::move(responseMsg));
     PerfUtils::TimeTrace::record(
         "Benchmark: Server::handleEchoRpc : Response sent (reply)");
 }
 
 void
-Server::handleEchoMultiLevelRpc(Homa::ServerOp* op)
+Server::handleEchoMultiLevelRpc(Roo::unique_ptr<Roo::ServerTask> task)
 {
     WireFormat::EchoMultiLevelRpc::Request request;
-    op->request->get(0, &request, sizeof(request));
-    op->request->get(sizeof(request), &buffer, request.sentBytes);
+    task->getRequest()->get(0, &request, sizeof(request));
+    task->getRequest()->get(sizeof(request), &buffer, request.sentBytes);
 
     if (proxy) {
-        op->response->append(&request, sizeof(request));
-        op->response->append(&buffer, request.sentBytes);
-        op->delegate(delegate);
+        Homa::unique_ptr<Homa::OutMessage> delegateMsg =
+            task->allocOutMessage();
+        delegateMsg->append(&request, sizeof(request));
+        delegateMsg->append(&buffer, request.sentBytes);
+        task->delegate(delegate, std::move(delegateMsg));
     } else {
         WireFormat::EchoMultiLevelRpc::Response response;
         response.common.opcode = WireFormat::EchoMultiLevelRpc::opcode;
         response.responseBytes = request.responseBytes;
-        op->response->append(&response, sizeof(response));
-        op->response->append(&buffer, response.responseBytes);
-        op->reply();
+        Homa::unique_ptr<Homa::OutMessage> responseMsg =
+            task->allocOutMessage();
+        responseMsg->append(&response, sizeof(response));
+        responseMsg->append(&buffer, response.responseBytes);
+        task->reply(std::move(responseMsg));
     }
 }
 
@@ -233,10 +245,10 @@ main(int argc, char* argv[])
     Homa::Drivers::DPDK::DpdkDriver::Config driverConfig;
     driverConfig.HIGHEST_PACKET_PRIORITY_OVERRIDE = 0;
     Homa::Drivers::DPDK::DpdkDriver driver(port, &driverConfig);
-    Homa::Transport transport(
+    std::unique_ptr<Homa::Transport> transport(Homa::Transport::create(
         &driver, std::hash<std::string>{}(
-                     driver.addressToString(driver.getLocalAddress())));
-    HomaRpcBench::Server server(&transport);
+                     driver.addressToString(driver.getLocalAddress()))));
+    std::unique_ptr<Roo::Socket> socket = Roo::Socket::create(transport.get());
 
     // Register the signal handler
     signal(SIGINT, sig_int_handler);
@@ -245,21 +257,23 @@ main(int argc, char* argv[])
     Homa::Driver::Address serverAddress = driver.getLocalAddress();
 
     // Register the Server
-    Homa::RemoteOp enlistRpc(&transport);
+    Roo::unique_ptr<Roo::RooPC> enlistRpc = socket->allocRooPC();
     HomaRpcBench::WireFormat::EnlistServerRpc::Request request;
     HomaRpcBench::WireFormat::EnlistServerRpc::Response response;
     request.common.opcode = HomaRpcBench::WireFormat::EnlistServerRpc::opcode;
     driver.addressToWireFormat(serverAddress, &request.address);
-    enlistRpc.request->append(&request, sizeof(request));
-    enlistRpc.send(coordinatorAddr);
-    while (!enlistRpc.isReady()) {
+    Homa::unique_ptr<Homa::OutMessage> requestMsg = enlistRpc->allocRequest();
+    requestMsg->append(&request, sizeof(request));
+    enlistRpc->send(coordinatorAddr, std::move(requestMsg));
+    while (enlistRpc->checkStatus() == Roo::RooPC::Status::IN_PROGRESS) {
         if (INTERRUPT_FLAG) {
             break;
         }
-        transport.poll();
+        socket->poll();
     }
-    enlistRpc.wait();
-    enlistRpc.response->get(0, &response, sizeof(response));
+    enlistRpc->wait();
+    Homa::unique_ptr<Homa::InMessage> responseMsg = enlistRpc->receive();
+    responseMsg->get(0, &response, sizeof(response));
 
     std::cout << "Registered as Server " << response.serverId << std::endl;
 
@@ -270,6 +284,7 @@ main(int argc, char* argv[])
         PerfUtils::TimeTrace::setOutputFileName(timetrace_log_path.c_str());
     }
 
+    HomaRpcBench::Server server(transport.get(), std::move(socket));
     // Run the server.
     while (true) {
         if (INTERRUPT_FLAG) {

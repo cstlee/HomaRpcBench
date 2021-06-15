@@ -1,13 +1,13 @@
-#include <functional>
-#include <iostream>
-#include <map>
-
-#include <signal.h>
-
 #include <Homa/Debug.h>
 #include <Homa/Drivers/DPDK/DpdkDriver.h>
 #include <Homa/Homa.h>
+#include <Roo/Roo.h>
 #include <docopt.h>
+#include <signal.h>
+
+#include <functional>
+#include <iostream>
+#include <map>
 
 #include "WireFormat.h"
 
@@ -32,16 +32,18 @@ class Coordinator {
   public:
     explicit Coordinator(Homa::Transport* transport)
         : transport(transport)
+        , socket(Roo::Socket::create(transport))
         , nextServerId(1)
         , serverMap()
     {}
     void poll();
 
   private:
-    void dispatch(Homa::ServerOp* op);
-    void handleEnlistRpc(Homa::ServerOp* op);
-    void handleGetServerList(Homa::ServerOp* op);
+    void dispatch(Roo::unique_ptr<Roo::ServerTask> task);
+    void handleEnlistRpc(Roo::unique_ptr<Roo::ServerTask> task);
+    void handleGetServerList(Roo::unique_ptr<Roo::ServerTask> task);
     Homa::Transport* transport;
+    std::unique_ptr<Roo::Socket> socket;
     uint64_t nextServerId;
     std::map<uint64_t, Homa::Driver::Address> serverMap;
 };
@@ -49,25 +51,25 @@ class Coordinator {
 void
 Coordinator::poll()
 {
-    Homa::ServerOp op = transport->receiveServerOp();
-    if (op) {
-        dispatch(&op);
+    Roo::unique_ptr<Roo::ServerTask> task = socket->receive();
+    if (task) {
+        dispatch(std::move(task));
     }
-    transport->poll();
+    socket->poll();
 }
 
 void
-Coordinator::dispatch(Homa::ServerOp* op)
+Coordinator::dispatch(Roo::unique_ptr<Roo::ServerTask> task)
 {
     WireFormat::Common common;
-    op->request->get(0, &common, sizeof(common));
+    task->getRequest()->get(0, &common, sizeof(common));
 
     switch (common.opcode) {
         case WireFormat::EnlistServerRpc::opcode:
-            handleEnlistRpc(op);
+            handleEnlistRpc(std::move(task));
             break;
         case WireFormat::GetServerListRpc::opcode:
-            handleGetServerList(op);
+            handleGetServerList(std::move(task));
             break;
         default:
             std::cerr << "Unknown opcode" << std::endl;
@@ -75,37 +77,41 @@ Coordinator::dispatch(Homa::ServerOp* op)
 }
 
 void
-Coordinator::handleEnlistRpc(Homa::ServerOp* op)
+Coordinator::handleEnlistRpc(Roo::unique_ptr<Roo::ServerTask> task)
 {
     WireFormat::EnlistServerRpc::Request request;
     WireFormat::EnlistServerRpc::Response response;
-    op->request->get(0, &request, sizeof(request));
+    task->getRequest()->get(0, &request, sizeof(request));
     uint64_t serverId = nextServerId++;
     Homa::Driver::Address serverAddress =
-        transport->driver->getAddress(&request.address);
+        transport->getDriver()->getAddress(&request.address);
     serverMap.insert({serverId, serverAddress});
     response.common.opcode = WireFormat::EnlistServerRpc::opcode;
     response.serverId = serverId;
-    op->response->append(&response, sizeof(response));
-    op->reply();
+    Homa::unique_ptr<Homa::OutMessage> responseMsg = task->allocOutMessage();
+    responseMsg->append(&response, sizeof(response));
+    task->reply(std::move(responseMsg));
     std::cout << "Enlisted Server " << serverId << " at "
-              << transport->driver->addressToString(serverAddress) << std::endl;
+              << transport->getDriver()->addressToString(serverAddress)
+              << std::endl;
 }
 
 void
-Coordinator::handleGetServerList(Homa::ServerOp* op)
+Coordinator::handleGetServerList(Roo::unique_ptr<Roo::ServerTask> task)
 {
     WireFormat::GetServerListRpc::Response response;
     response.common.opcode = WireFormat::GetServerListRpc::opcode;
     response.num = serverMap.size();
-    op->response->append(&response, sizeof(response));
+    Homa::unique_ptr<Homa::OutMessage> responseMsg = task->allocOutMessage();
+    responseMsg->append(&response, sizeof(response));
     for (auto server = serverMap.begin(); server != serverMap.end(); ++server) {
         WireFormat::GetServerListRpc::ServerListEntry entry;
         entry.serverId = server->first;
-        transport->driver->addressToWireFormat(server->second, &entry.address);
-        op->response->append(&entry, sizeof(entry));
+        transport->getDriver()->addressToWireFormat(server->second,
+                                                    &entry.address);
+        responseMsg->append(&entry, sizeof(entry));
     }
-    op->reply();
+    task->reply(std::move(responseMsg));
     std::cout << "Replied to getServerList with " << response.num << " entries."
               << std::endl;
 }
@@ -147,10 +153,10 @@ main(int argc, char* argv[])
     Homa::Drivers::DPDK::DpdkDriver::Config driverConfig;
     driverConfig.HIGHEST_PACKET_PRIORITY_OVERRIDE = 0;
     Homa::Drivers::DPDK::DpdkDriver driver(port, &driverConfig);
-    Homa::Transport transport(
+    std::unique_ptr<Homa::Transport> transport(Homa::Transport::create(
         &driver, std::hash<std::string>{}(
-                     driver.addressToString(driver.getLocalAddress())));
-    HomaRpcBench::Coordinator coordinator(&transport);
+                     driver.addressToString(driver.getLocalAddress()))));
+    HomaRpcBench::Coordinator coordinator(transport.get());
 
     // Register the signal handler
     signal(SIGINT, sig_int_handler);
